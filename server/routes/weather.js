@@ -42,6 +42,21 @@ function wmoIcon(code, isDay = true) {
   return 'cloud-lightning';                            // 95–99 thunderstorm
 }
 
+// Tageswind auf `today` und `forecast`, in derselben Einheit wie
+// `current.wind_speed`. Open-Meteo liefert die Zahl schon in `wind_speed_unit`;
+// OpenWeatherMap rechnet m/s nach km/h (mal 3.6), ausser die Einheit ist
+// imperial - dann ist der Wind schon mph, wie der Ist-Wind. Eine fehlende Zahl
+// bleibt weg: `Math.round(null)` waere 0 und damit ein erfundener Wind.
+function putRounded(target, key, value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return;
+  target[key] = Math.round(value);
+}
+
+function owmSpeedInUnit(speed, units) {
+  if (typeof speed !== 'number' || !Number.isFinite(speed)) return undefined;
+  return units === 'imperial' ? speed : speed * 3.6;
+}
+
 // ----------------------------------------------------------------
 // Read a sync_config key from DB (safe — returns null on any error)
 // ----------------------------------------------------------------
@@ -206,7 +221,9 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
   // Response: { data: { provider, city, units, current, today, forecast } }
   //         | { data: null, reason: 'not_configured' | 'upstream_error' }
   // `today` traegt den Kalendertag AM WETTERORT samt Hoch/Tief; `forecast` sind
-  // die Folgetage. Die Anzeige benennt ihre Tage an `today.date`, nicht am Index.
+  // die Folgetage. Beide tragen `wind_speed`, `wind_gust` und `wind_direction`,
+  // wenn der Anbieter eine Zahl hat, in derselben Einheit wie `current.wind_speed`.
+  // Die Anzeige benennt ihre Tage an `today.date`, nicht am Index.
   // ---------------------------------------------------------------
   router.get('/', async (req, res) => {
     // Ausserhalb des try, damit der catch unten den Anbieter nennen kann.
@@ -268,7 +285,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
           `?latitude=${encodeURIComponent(lat)}`,
           `&longitude=${encodeURIComponent(lon)}`,
           '&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code,wind_speed_10m',
-          '&daily=weather_code,temperature_2m_max,temperature_2m_min',
+          '&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant',
           '&timezone=auto',
           '&forecast_days=6',
           `&temperature_unit=${tempUnit}`,
@@ -288,13 +305,21 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
         // die Kalendertage DES ORTES - der erste davon ist heute. Der Rueckfall
         // greift nur, wenn `daily` ganz fehlt; dann sind `today` und `forecast`
         // ohnehin leer.
-        const days = (om.daily?.time ?? []).map((date, i) => ({
-          date,
-          temp_min: Math.round(om.daily.temperature_2m_min[i]),
-          temp_max: Math.round(om.daily.temperature_2m_max[i]),
-          icon: wmoIcon(om.daily.weather_code[i], true),
-          desc: `wmo.${om.daily.weather_code[i]}`,
-        }));
+        const days = (om.daily?.time ?? []).map((date, i) => {
+          const day = {
+            date,
+            temp_min: Math.round(om.daily.temperature_2m_min[i]),
+            temp_max: Math.round(om.daily.temperature_2m_max[i]),
+            icon: wmoIcon(om.daily.weather_code[i], true),
+            desc: `wmo.${om.daily.weather_code[i]}`,
+          };
+          // Staerkster Wind, staerkste Boe, vorherrschende Richtung. Die Einheit
+          // steht schon in der Anfrage (`wind_speed_unit`), dieselbe wie beim Ist-Wind.
+          putRounded(day, 'wind_speed', om.daily.wind_speed_10m_max?.[i]);
+          putRounded(day, 'wind_gust', om.daily.wind_gusts_10m_max?.[i]);
+          putRounded(day, 'wind_direction', om.daily.wind_direction_10m_dominant?.[i]);
+          return day;
+        });
         const omToday = days[0]?.date ?? utcDateKey();
         // Open-Meteo gibt den Offset des Ortes mit heraus - Folge von
         // `timezone=auto`, die Antwort ist ohnehin in Ortszeit geschluesselt.
@@ -367,13 +392,36 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
             // wie +05:30 gaebe es ihn im Ortstag ueberhaupt nicht.
             const noon = items.reduce((best, cur) =>
               Math.abs(cur.hour - 12) < Math.abs(best.hour - 12) ? cur : best, items[0]).item;
-            days.push({
+            const day = {
               date:     dateStr,
               temp_min: Math.round(Math.min(...temps)),
               temp_max: Math.round(Math.max(...temps)),
               icon:     noon.weather[0]?.icon,
               desc:     noon.weather[0]?.description,
-            });
+            };
+            // Der Schritt mit dem hoechsten wind.speed traegt Geschwindigkeit und
+            // Richtung; die Boe ist das Maximum des Tages, auch auf einem anderen
+            // Schritt. Umrechnung wie beim Ist-Wind.
+            let strongest = null;
+            let maxGust = null;
+            for (const { item } of items) {
+              const wind = item?.wind;
+              if (!wind || typeof wind !== 'object') continue;
+              if (typeof wind.speed === 'number' && Number.isFinite(wind.speed)
+                  && (strongest === null || wind.speed > strongest.speed)) {
+                strongest = wind;
+              }
+              if (typeof wind.gust === 'number' && Number.isFinite(wind.gust)
+                  && (maxGust === null || wind.gust > maxGust)) {
+                maxGust = wind.gust;
+              }
+            }
+            if (strongest) {
+              putRounded(day, 'wind_speed', owmSpeedInUnit(strongest.speed, units));
+              putRounded(day, 'wind_direction', strongest.deg);
+            }
+            putRounded(day, 'wind_gust', owmSpeedInUnit(maxGust, units));
+            days.push(day);
           }
           todayDay = days.find((d) => d.date === owmToday) ?? null;
           // `>` und nicht `!==`: die Liste kann mit einem bereits vergangenen
@@ -395,13 +443,19 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
         // Open-Meteo liefert dagegen echte Tagesaggregate und behaelt sein
         // Hoch/Tief. `date` steht auch hier: es ist die Bezugsgroesse, an der die
         // Anzeige ihre Tage benennt, und die stimmt unabhaengig davon.
+        // Der Wind bleibt stehen: er ist das Maximum der Schritte, die es gibt,
+        // keine erfundene Tagesspanne. Hoch und Tief bleiben null.
+        const windOfToday = todayDay;
         todayDay = {
           date:     owmToday,
           temp_min: null,
           temp_max: null,
-          icon:     todayDay?.icon ?? currentJson.weather[0]?.icon,
-          desc:     todayDay?.desc ?? currentJson.weather[0]?.description,
+          icon:     windOfToday?.icon ?? currentJson.weather[0]?.icon,
+          desc:     windOfToday?.desc ?? currentJson.weather[0]?.description,
         };
+        for (const key of ['wind_speed', 'wind_gust', 'wind_direction']) {
+          if (windOfToday && Object.hasOwn(windOfToday, key)) todayDay[key] = windOfToday[key];
+        }
 
         data = {
           provider: 'openweathermap',
