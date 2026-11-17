@@ -566,6 +566,125 @@ test('Open-Meteo ohne die Wind-Arrays erfindet keinen Tageswind', async () => {
   } finally { await close(); }
 });
 
+// Stundenreihe fuer die Uebersichtsgrafik. `hourly=` ist das Stundenfeld;
+// `wind_speed_10m` darin, nicht nur `wind_speed_10m_max` im Tagesblock.
+test('Open-Meteo: die URL fragt die Stundenreihe samt wind_speed_10m ab', async () => {
+  let seen = null;
+  const { baseUrl, close } = await startApp({
+    env: { WEATHER_LAT: '52.52', WEATHER_LON: '13.41' },
+    fetchFn: async (url) => {
+      seen = String(url);
+      return OM_FETCH(url);
+    },
+  });
+  try {
+    const { status } = await getJson(baseUrl);
+    assert.equal(status, 200);
+    assert.match(seen, /hourly=/);
+    const hourly = new URL(seen).searchParams.get('hourly').split(',');
+    assert.ok(hourly.includes('wind_speed_10m'), 'wind_speed_10m gehoert zur Stundenreihe, nicht nur zum Tagesmaximum');
+    assert.equal(hourly.includes('wind_speed_10m_max'), false);
+  } finally { await close(); }
+});
+
+test('Open-Meteo: die Stunde wird von Ortszeit nach UTC gerechnet und traegt Wind, Boe und Richtung', async () => {
+  const { baseUrl, close } = await startApp({
+    env: { WEATHER_LAT: '52.52', WEATHER_LON: '13.41', WEATHER_CITY: 'Berlin' },
+    fetchFn: async () => ({
+      ok: true,
+      json: async () => ({
+        utc_offset_seconds: 3600,
+        current: { temperature_2m: 18.5, apparent_temperature: 16.0, relative_humidity_2m: 65,
+          is_day: 1, weather_code: 2, wind_speed_10m: 14.4 },
+        daily: {
+          time: ['2026-11-17', '2026-11-18'],
+          weather_code: [3, 0],
+          temperature_2m_max: [8, 9],
+          temperature_2m_min: [1, 2],
+        },
+        hourly: {
+          time: ['2026-11-17T18:00'],
+          temperature_2m: [1.5],
+          precipitation: [0.2],
+          weather_code: [3],
+          is_day: [0],
+          wind_speed_10m: [10.8],
+          wind_gusts_10m: [22.7],
+          wind_direction_10m: [9],
+        },
+      }),
+    }),
+  });
+  try {
+    const { status, body } = await getJson(baseUrl);
+    assert.equal(status, 200);
+    const step = body.data.hourly[0];
+    assert.equal(step.time, '2026-11-17T17:00:00.000Z');
+    assert.equal(step.temp, 1.5);
+    assert.equal(step.precip, 0.2);
+    assert.equal(step.wind_speed, 10.8);
+    assert.equal(step.wind_gust, 22.7);
+    assert.equal(step.wind_direction, 9);
+    assert.equal(step.icon, 'cloud');
+  } finally { await close(); }
+});
+
+test('Open-Meteo ohne hourly-Block: data.hourly ist eine leere Liste', async () => {
+  const { baseUrl, close } = await startApp({
+    env: { WEATHER_LAT: '52.52', WEATHER_LON: '13.41' },
+    fetchFn: OM_FETCH,
+  });
+  try {
+    const { status, body } = await getJson(baseUrl);
+    assert.equal(status, 200);
+    assert.deepEqual(body.data.hourly, []);
+  } finally { await close(); }
+});
+
+test('Open-Meteo: eine fehlende Windzahl der Stunde bleibt weg und wird nicht zu 0', async () => {
+  const { baseUrl, close } = await startApp({
+    env: { WEATHER_LAT: '52.52', WEATHER_LON: '13.41' },
+    fetchFn: async () => ({
+      ok: true,
+      json: async () => ({
+        utc_offset_seconds: 0,
+        current: { temperature_2m: 18.5, apparent_temperature: 16.0, relative_humidity_2m: 65,
+          is_day: 1, weather_code: 2, wind_speed_10m: 14.4 },
+        daily: {
+          time: ['2026-11-17'],
+          weather_code: [2],
+          temperature_2m_max: [22],
+          temperature_2m_min: [14],
+        },
+        hourly: {
+          time: ['2026-11-17T12:00', '2026-11-17T13:00'],
+          temperature_2m: [15, 16],
+          precipitation: [0, 0],
+          weather_code: [2, 3],
+          is_day: [1, 1],
+          wind_speed_10m: [null, 4.2],
+          wind_gusts_10m: [undefined, null],
+          wind_direction_10m: [null, 90],
+        },
+      }),
+    }),
+  });
+  try {
+    const { status, body } = await getJson(baseUrl);
+    assert.equal(status, 200);
+    const [missing, present] = body.data.hourly;
+    assert.equal(missing.temp, 15);
+    assert.equal('wind_speed' in missing, false);
+    assert.equal('wind_gust' in missing, false);
+    assert.equal('wind_direction' in missing, false);
+    assert.notEqual(missing.wind_speed, 0);
+    assert.equal(present.wind_speed, 4.2);
+    assert.equal('wind_gust' in present, false);
+    assert.equal(present.wind_direction, 90);
+    assert.equal('wind_speed' in body.data.today, false, 'der Tag erfindet weiter keinen Wind');
+  } finally { await close(); }
+});
+
 test('der Cache haelt nicht ueber die Ortsmitternacht hinweg', async () => {
   // Eine kurz vor Mitternacht abgelegte Antwort haette sonst bis zu eine halbe
   // Stunde danach `today.date` auf gestern stehen - der erste Vorhersagetag ist

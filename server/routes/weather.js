@@ -52,6 +52,43 @@ function putRounded(target, key, value) {
   target[key] = Math.round(value);
 }
 
+// Stundenreihe fuer die Uebersichtsgrafik. Open-Meteo schickt die Zeiten in
+// Ortszeit (`timezone=auto`); hinaus gehen sie als UTC. Wind, Boe und Richtung
+// nur, wenn der Anbieter eine Zahl hat - sonst waere 0 ein erfundener Wind.
+function localToUtcIso(local, offsetSec) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(local || ''));
+  if (!match) return null;
+  const [y, m, d, h, min] = match.slice(1).map(Number);
+  return new Date(Date.UTC(y, m - 1, d, h, min) - (Number(offsetSec) || 0) * 1000).toISOString();
+}
+
+function hourlySteps(om) {
+  const times = om.hourly?.time;
+  if (!Array.isArray(times)) return [];
+  const offset = Number(om.utc_offset_seconds) || 0;
+  return times.flatMap((local, i) => {
+    const time = localToUtcIso(local, offset);
+    const temp = om.hourly.temperature_2m?.[i];
+    if (!time || typeof temp !== 'number' || !Number.isFinite(temp)) return [];
+    const code = om.hourly.weather_code?.[i];
+    const precip = om.hourly.precipitation?.[i];
+    const step = {
+      time,
+      temp,
+      precip: typeof precip === 'number' && Number.isFinite(precip) ? precip : 0,
+      icon: wmoIcon(code, om.hourly.is_day?.[i] === 1),
+      desc: `wmo.${code}`,
+    };
+    const speed = om.hourly.wind_speed_10m?.[i];
+    const gust = om.hourly.wind_gusts_10m?.[i];
+    const dir = om.hourly.wind_direction_10m?.[i];
+    if (typeof speed === 'number' && Number.isFinite(speed)) step.wind_speed = speed;
+    if (typeof gust === 'number' && Number.isFinite(gust)) step.wind_gust = gust;
+    if (typeof dir === 'number' && Number.isFinite(dir)) step.wind_direction = dir;
+    return [step];
+  });
+}
+
 function owmSpeedInUnit(speed, units) {
   if (typeof speed !== 'number' || !Number.isFinite(speed)) return undefined;
   return units === 'imperial' ? speed : speed * 3.6;
@@ -218,11 +255,13 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
 
   // ---------------------------------------------------------------
   // GET /api/v1/weather
-  // Response: { data: { provider, city, units, current, today, forecast } }
+  // Response: { data: { provider, city, units, current, today, forecast, hourly } }
   //         | { data: null, reason: 'not_configured' | 'upstream_error' }
   // `today` traegt den Kalendertag AM WETTERORT samt Hoch/Tief; `forecast` sind
   // die Folgetage. Beide tragen `wind_speed`, `wind_gust` und `wind_direction`,
   // wenn der Anbieter eine Zahl hat, in derselben Einheit wie `current.wind_speed`.
+  // `hourly` (nur Open-Meteo) ist die Stundenreihe: Temperatur, Niederschlag,
+  // Wind, Boe und Richtung, die Zeiten in UTC. Eine fehlende Windzahl bleibt weg.
   // Die Anzeige benennt ihre Tage an `today.date`, nicht am Index.
   // ---------------------------------------------------------------
   router.get('/', async (req, res) => {
@@ -254,7 +293,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
 
       // ── 2. Cache check ───────────────────────────────────────
       const cacheKey = provider === 'open-meteo'
-        ? `om:${lat}|${lon}|${units}`
+        ? `om:v2:${lat}|${lon}|${units}`
         : `owm:${owmCity}|${units}|${owmLang}`;
 
       // Die halbe Stunde ist die eine Grenze, der ORTSTAG die andere. Eine kurz
@@ -285,6 +324,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
           `?latitude=${encodeURIComponent(lat)}`,
           `&longitude=${encodeURIComponent(lon)}`,
           '&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code,wind_speed_10m',
+          '&hourly=temperature_2m,precipitation,weather_code,is_day,wind_speed_10m,wind_gusts_10m,wind_direction_10m',
           '&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant',
           '&timezone=auto',
           '&forecast_days=6',
@@ -339,6 +379,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
           },
           today: days.find((d) => d.date === omToday) ?? null,
           forecast: days.filter((d) => d.date > omToday).slice(0, 5),
+          hourly: hourlySteps(om),
         };
       } else {
         // OWM legacy path
