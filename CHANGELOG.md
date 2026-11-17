@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The weather overview can draw wind as a line.** `hourly` on `GET /api/v1/weather` (Open-Meteo)
+  lists each hour's temperature, precipitation, wind, gust and direction, with times in UTC.
+  A missing wind number is left out rather than stored as 0. Daily `wind_speed`, `wind_gust`
+  and `wind_direction` stay. OpenWeatherMap responses have no `hourly` key.
 - **Each day of the weather forecast carries its strongest wind.** `today` and `forecast` on
   `GET /api/v1/weather` include `wind_speed`, `wind_gust`, and `wind_direction` when the provider
   reports a number, in the same unit as `current.wind_speed` (km/h, or mph when the units are
