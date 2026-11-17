@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The weather overview can draw wind as a line.** `GET /api/v1/weather` from Open-Meteo
+  now includes each hour's temperature, precipitation, wind, gust and direction, with times
+  in UTC, and each day's wind in the same unit as the wind measured now. A missing wind
+  number is left out rather than stored as 0. OpenWeatherMap responses have no hourly series.
+
 ## [2.91.1] - 2026-11-17
 
 ### Fixed
