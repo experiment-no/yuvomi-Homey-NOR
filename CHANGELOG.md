@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Each day of the weather forecast carries its strongest wind.** `today` and `forecast` on
+  `GET /api/v1/weather` include `wind_speed`, `wind_gust`, and `wind_direction` when the provider
+  reports a number, in the same unit as `current.wind_speed` (km/h, or mph when the units are
+  imperial). Open-Meteo supplies the day's maximum wind and gust and the prevailing direction.
+  OpenWeatherMap uses the 3-hour step with the highest wind speed for speed and direction, and the
+  day's highest gust. A missing number is left out rather than shown as 0.
 - **Stock: the minimum belongs to the product, and running low is read over all its batches**
   (part 3 of #1448). Toothpaste with 1 in the bathroom, 8 in the attic and a minimum of 3 no
   longer reads as running low: the household has 9. Milk with 1 l, 1 l and 2 l against a minimum
